@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: usdt_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: usdt_deposits
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - usdt_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis для кэширования и очередей
+  redis:
+    image: redis:7-alpine
+    container_name: usdt_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass redis123
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - usdt_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: usdt_backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: usdt_deposits
+      DB_USER: postgres
+      DB_PASSWORD: password123
+      REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: redis123
+    volumes:
+      - ./backend/logs:/app/logs
+    ports:
+      - "3000:3000"
+    networks:
+      - usdt_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend WebApp
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: usdt_frontend
+    restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: http://localhost:3000/api/v1
+    ports:
+      - "3001:80"
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+
+  # Admin Panel
+  admin-panel:
+    build:
+      context: ./admin-panel
+      dockerfile: Dockerfile
+    container_name: usdt_admin
+    restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: http://localhost:3000/api/v1
+    ports:
+      - "3002:80"
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: usdt_nginx
+    restart: unless-stopped
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+      - frontend
+      - admin-panel
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  usdt_network:
+    driver: bridge

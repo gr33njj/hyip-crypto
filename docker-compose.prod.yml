@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  postgres:
+    image: postgres:15-alpine
+    container_name: usdt_postgres_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-usdt_deposits}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - usdt_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis для кэширования
+  redis:
+    image: redis:7-alpine
+    container_name: usdt_redis_prod
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - usdt_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: usdt_backend_prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-usdt_deposits}
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_WEBHOOK_URL: ${TELEGRAM_WEBHOOK_URL}
+      TELEGRAM_SECRET_TOKEN: ${TELEGRAM_SECRET_TOKEN}
+      POOL_WALLET_ADDRESS: ${POOL_WALLET_ADDRESS}
+      HOT_WALLET_ADDRESS: ${HOT_WALLET_ADDRESS}
+      USDT_CONTRACT_ADDRESS: ${USDT_CONTRACT_ADDRESS:-TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t}
+      TRON_NETWORK: ${TRON_NETWORK:-mainnet}
+      TRON_API_KEY: ${TRON_API_KEY}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    volumes:
+      - ./backend/logs:/app/logs
+    networks:
+      - usdt_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend WebApp
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: ${FRONTEND_API_URL}
+        REACT_APP_ENVIRONMENT: production
+    container_name: usdt_frontend_prod
+    restart: unless-stopped
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+
+  # Admin Panel
+  admin-panel:
+    build:
+      context: ./admin-panel
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_URL: ${ADMIN_API_URL}
+        REACT_APP_ENVIRONMENT: production
+    container_name: usdt_admin_prod
+    restart: unless-stopped
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: usdt_nginx_prod
+    restart: unless-stopped
+    volumes:
+      - ./docker/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+      - certbot_data:/var/www/certbot
+      - ssl_certs:/etc/letsencrypt
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - usdt_network
+    depends_on:
+      - backend
+      - frontend
+      - admin-panel
+
+  # Certbot для SSL сертификатов
+  certbot:
+    image: certbot/certbot
+    container_name: usdt_certbot
+    volumes:
+      - certbot_data:/var/www/certbot
+      - ssl_certs:/etc/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  certbot_data:
+    driver: local
+  ssl_certs:
+    driver: local
+
+networks:
+  usdt_network:
+    driver: bridge
